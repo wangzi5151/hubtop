@@ -55,8 +55,8 @@ func (m *model) renderDetail() string {
 			sha = sha[:7]
 		}
 		fail := ""
-		if s, ok := d.failedInfo[r.ID]; ok {
-			fail = dimStyle.Render("  ← " + s)
+		if ss, ok := d.failedInfo[r.ID]; ok && len(ss) > 0 {
+			fail = dimStyle.Render("  ← " + strings.Join(ss, ", "))
 		}
 		b.WriteString(fmt.Sprintf("  %s %s  %s  %s  %s  %s  %s%s\n",
 			runIcon(r.Status, r.ConclusionValue()),

@@ -167,6 +167,9 @@ func (r WorkflowRun) ConclusionValue() string {
 
 // Duration reports how long the run took (or has been running).
 func (r WorkflowRun) Duration() time.Duration {
+	if r.CreatedAt.IsZero() {
+		return 0
+	}
 	end := r.UpdatedAt
 	if r.Status != "completed" {
 		end = time.Now()
@@ -223,19 +226,24 @@ func (c *Client) RerunWorkflowRun(ctx context.Context, owner, repo string, runID
 	return c.post(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs/%d/rerun", owner, repo, runID))
 }
 
-// FailedStep returns "job / step" for the first failed step, or "".
-func FailedStep(jobs []Job) string {
+// FailedSteps returns "job / step" for every failed step, in order.
+func FailedSteps(jobs []Job) []string {
+	var out []string
 	for _, j := range jobs {
 		if c := strVal(j.Conclusion); c == "failure" || c == "timed_out" {
+			hit := false
 			for _, s := range j.Steps {
 				if sc := strVal(s.Conclusion); sc == "failure" || sc == "timed_out" {
-					return j.Name + " / " + s.Name
+					out = append(out, j.Name+" / "+s.Name)
+					hit = true
 				}
 			}
-			return j.Name
+			if !hit {
+				out = append(out, j.Name)
+			}
 		}
 	}
-	return ""
+	return out
 }
 
 // Release is the subset of release fields the dashboard shows.

@@ -122,20 +122,23 @@ func TestListRunJobsAndFailedStep(t *testing.T) {
 		if !strings.HasSuffix(r.URL.Path, "/jobs") {
 			t.Errorf("bad path: %s", r.URL.Path)
 		}
-		w.Write([]byte(`{"total_count":2,"jobs":[{"id":1,"name":"test","conclusion":"success","steps":[{"name":"build","conclusion":"success","number":1}]},{"id":2,"name":"lint","conclusion":"failure","steps":[{"name":"gofmt","conclusion":"failure","number":1},{"name":"vet","conclusion":"success","number":2}]}]}`))
+		w.Write([]byte(`{"total_count":3,"jobs":[{"id":1,"name":"test","conclusion":"failure","steps":[{"name":"build","conclusion":"success","number":1},{"name":"unit","conclusion":"failure","number":2}]},{"id":2,"name":"lint","conclusion":"failure","steps":[{"name":"gofmt","conclusion":"failure","number":1},{"name":"vet","conclusion":"success","number":2}]},{"id":3,"name":"deploy","conclusion":"success","steps":[{"name":"push","conclusion":"success","number":1}]}]}`))
 	})
 	jobs, err := c.ListRunJobs(context.Background(), "me", "hubtop", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 2 {
-		t.Fatalf("want 2 jobs, got %d", len(jobs))
+	if len(jobs) != 3 {
+		t.Fatalf("want 3 jobs, got %d", len(jobs))
 	}
-	if got := FailedStep(jobs); got != "lint / gofmt" {
-		t.Fatalf("bad failed step: %q", got)
+	if got := FailedSteps(jobs); len(got) != 2 || got[0] != "test / unit" || got[1] != "lint / gofmt" {
+		t.Fatalf("bad failed steps: %q", got)
 	}
-	if got := FailedStep(jobs[:1]); got != "" {
-		t.Fatalf("want empty failed step, got %q", got)
+	if got := FailedSteps(jobs[1:]); len(got) != 1 || got[0] != "lint / gofmt" {
+		t.Fatalf("bad failed steps subset: %q", got)
+	}
+	if got := FailedSteps(nil); len(got) != 0 {
+		t.Fatalf("want no failed steps, got %q", got)
 	}
 }
 

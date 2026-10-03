@@ -9,14 +9,15 @@
 - **name**, **★ stars**, **! open issues/PRs**, **language**, **last push**
 
 Private repos show a 🔒. Press `/` to filter by name (type to filter,
-`enter` to keep, `esc` to clear). Press `o` to open the selected repo
-in your browser.
+`enter` to keep, `esc` to clear). Press `s` to cycle the list order
+(updated → stars → name). Press `o` to open the selected repo
+in your browser. Press `?` for a key-binding cheat sheet.
 
 Press `enter` for the detail view:
 
 - **Workflow runs** — the 10 most recent runs with branch, short SHA,
-  conclusion, duration, and age. Failed runs also show which job and
-  step failed (e.g. `← lint / gofmt`).
+  conclusion, duration, and age. Failed runs list every failed
+  job/step (e.g. `← lint / gofmt, test / unit`).
 - **Latest release** — tag and publish date
 - **Open pull requests / issues** — newest 5 each
 
@@ -32,8 +33,8 @@ the view afterwards. Your token needs **Actions: write** for this.
 ## Script mode
 
 `hubtop --failures` prints one line per repo whose latest run is failing
-(`FAIL`) or still running (`RUN`), and exits non-zero when anything
-fails. Handy for cron or a pre-push hook:
+(`FAIL`) or still running (`RUN`), including the failed job/step, and
+exits non-zero when anything fails. Handy for cron or a pre-push hook:
 
 ```sh
 hubtop --failures || echo "CI is red somewhere"

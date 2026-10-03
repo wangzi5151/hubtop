@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,26 @@ const (
 	viewRepos view = iota
 	viewDetail
 )
+
+// sortMode controls repo list ordering.
+type sortMode int
+
+const (
+	sortUpdated sortMode = iota
+	sortStars
+	sortName
+)
+
+func (s sortMode) String() string {
+	switch s {
+	case sortStars:
+		return "stars"
+	case sortName:
+		return "name"
+	default:
+		return "updated"
+	}
+}
 
 const (
 	maxRunPrefetch = 30
@@ -51,7 +72,9 @@ type model struct {
 	filtering   bool
 	filterInput textinput.Model
 
-	status string // transient status line, cleared on refresh
+	sort     sortMode
+	showHelp bool
+	status   string // transient status line, cleared on refresh
 
 	loading bool
 	err     error
@@ -67,7 +90,7 @@ type model struct {
 type repoDetail struct {
 	repo       gh.Repo
 	runs       []gh.WorkflowRun
-	failedInfo map[int64]string // run ID -> "job / step"
+	failedInfo map[int64][]string // run ID -> ["job / step", ...]
 	release    *gh.Release
 	issues     []gh.Issue
 	pulls      []gh.PullRequest
@@ -161,15 +184,15 @@ func (m *model) fetchDetailCmd(gen, idx int, repo gh.Repo) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		owner, name := splitRepo(repo.FullName)
-		d := &repoDetail{repo: repo, failedInfo: make(map[int64]string)}
+		d := &repoDetail{repo: repo, failedInfo: make(map[int64][]string)}
 		if runs, err := m.client.ListWorkflowRuns(ctx, owner, name, 10); err == nil {
 			d.runs = runs
-			// Resolve the failed job/step for the first couple of failed runs.
+			// Resolve the failed job/steps for the first couple of failed runs.
 			n := 0
 			for _, r := range runs {
 				if c := r.ConclusionValue(); c == "failure" || c == "timed_out" {
 					if jobs, err := m.client.ListRunJobs(ctx, owner, name, r.ID); err == nil {
-						if s := gh.FailedStep(jobs); s != "" {
+						if s := gh.FailedSteps(jobs); len(s) > 0 {
 							d.failedInfo[r.ID] = s
 						}
 					}
@@ -226,7 +249,8 @@ func (m *model) rerunCmd() tea.Cmd {
 	}
 }
 
-// applyFilter rebuilds the visible repo index list from the filter text.
+// applyFilter rebuilds the visible repo index list from the filter text,
+// then orders it by the current sort mode.
 func (m *model) applyFilter() {
 	q := strings.ToLower(strings.TrimSpace(m.filterInput.Value()))
 	m.viewIdx = m.viewIdx[:0]
@@ -235,6 +259,16 @@ func (m *model) applyFilter() {
 			strings.Contains(strings.ToLower(r.FullName), q) {
 			m.viewIdx = append(m.viewIdx, i)
 		}
+	}
+	switch m.sort {
+	case sortStars:
+		sort.Slice(m.viewIdx, func(a, b int) bool {
+			return m.repos[m.viewIdx[a]].Stars > m.repos[m.viewIdx[b]].Stars
+		})
+	case sortName:
+		sort.Slice(m.viewIdx, func(a, b int) bool {
+			return m.repos[m.viewIdx[a]].Name < m.repos[m.viewIdx[b]].Name
+		})
 	}
 	if m.cursor >= len(m.viewIdx) {
 		m.cursor = max(0, len(m.viewIdx)-1)
@@ -343,6 +377,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Help overlay: any key closes it (q / ctrl+c still quit).
+	if m.showHelp {
+		if k := msg.String(); k == "ctrl+c" || k == "q" {
+			return m, tea.Quit
+		}
+		m.showHelp = false
+		return m, nil
+	}
+
 	// Filter mode: all keys go to the input. The explicit m.filtering flag
 	// (not Focused()) decides this, so typing q/r inside the filter is safe.
 	if m.filtering {
@@ -367,6 +410,16 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "?":
+		m.showHelp = true
+		return m, nil
+	case "s":
+		if m.view == viewRepos {
+			m.sort = (m.sort + 1) % 3
+			m.applyFilter()
+			m.status = "sorted by " + m.sort.String()
+		}
+		return m, nil
 	case "/":
 		if m.view == viewRepos {
 			m.filtering = true
@@ -490,16 +543,42 @@ func (m *model) View() string {
 	if !m.ready {
 		return "loading..."
 	}
+	if m.showHelp {
+		return m.viewHelp()
+	}
 	if m.view == viewDetail {
 		return m.viewDetail()
 	}
 	return m.viewRepos()
 }
 
+func (m *model) viewHelp() string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("hubtop — key bindings") + "\n")
+	b.WriteString(dimStyle.Render(strings.Repeat("─", max(10, m.w-1))) + "\n\n")
+	rows := [][2]string{
+		{"j/k, ↑/↓", "move selection"},
+		{"enter", "open repo detail"},
+		{"esc", "back to list / clear filter"},
+		{"/", "filter repos by name"},
+		{"o", "open repo in browser"},
+		{"R", "re-run latest failed workflow (detail view)"},
+		{"r", "refresh"},
+		{"s", "cycle sort: updated → stars → name"},
+		{"?", "this help"},
+		{"q", "quit"},
+	}
+	for _, r := range rows {
+		b.WriteString(fmt.Sprintf("  %-14s %s\n", nameStyle.Render(r[0]), r[1]))
+	}
+	b.WriteString("\n" + dimStyle.Render("any key to close"))
+	return b.String()
+}
+
 func (m *model) viewRepos() string {
 	var b strings.Builder
 	title := headerStyle.Render(fmt.Sprintf("hubtop — %d repos", len(m.repos)))
-	hint := dimStyle.Render("j/k move · enter detail · / filter · o open · r refresh · q quit")
+	hint := dimStyle.Render("j/k move · enter detail · / filter · s sort · o open · ? help · r refresh · q quit")
 	b.WriteString(title + "  " + hint + "\n")
 	b.WriteString(dimStyle.Render(strings.Repeat("─", max(10, m.w-1))) + "\n")
 

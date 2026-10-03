@@ -93,7 +93,13 @@ func runFailures(client *gh.Client) error {
 		run := runs[0]
 		concl := run.ConclusionValue()
 		if concl == "failure" || concl == "timed_out" {
-			fmt.Printf("FAIL  %-32s %s %s %s\n", r.FullName, run.Name, run.HeadBranch, run.HTMLURL)
+			why := ""
+			if jobs, err := client.ListRunJobs(ctx, owner, name, run.ID); err == nil {
+				if ss := gh.FailedSteps(jobs); len(ss) > 0 {
+					why = " ← " + strings.Join(ss, ", ")
+				}
+			}
+			fmt.Printf("FAIL  %-32s %s %s%s %s\n", r.FullName, run.Name, run.HeadBranch, why, run.HTMLURL)
 			failed++
 		} else if concl == "" {
 			fmt.Printf("RUN   %-32s %s %s\n", r.FullName, run.Name, run.HeadBranch)

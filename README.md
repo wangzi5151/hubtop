@@ -4,7 +4,7 @@
 CI status, open issues/PRs, and latest releases — in one screen, no browser.
 
 ```
- hubtop — 3 repos  j/k move · enter detail · r refresh · q quit
+ hubtop — 3 repos  j/k move · enter detail · / filter · s sort · ? help · r refresh · q quit
  ───────────────────────────────────────────────────────────────
  ● mcpscope           ★12  !3  Go      14m ago
  ● nethole-tester     ★5   !0  Go      1d ago

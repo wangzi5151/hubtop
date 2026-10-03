@@ -116,3 +116,50 @@ func TestAPIError(t *testing.T) {
 		t.Fatalf("want api error, got %v", err)
 	}
 }
+
+func TestListRunJobsAndFailedStep(t *testing.T) {
+	c, _ := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/jobs") {
+			t.Errorf("bad path: %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"total_count":2,"jobs":[{"id":1,"name":"test","conclusion":"success","steps":[{"name":"build","conclusion":"success","number":1}]},{"id":2,"name":"lint","conclusion":"failure","steps":[{"name":"gofmt","conclusion":"failure","number":1},{"name":"vet","conclusion":"success","number":2}]}]}`))
+	})
+	jobs, err := c.ListRunJobs(context.Background(), "me", "hubtop", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("want 2 jobs, got %d", len(jobs))
+	}
+	if got := FailedStep(jobs); got != "lint / gofmt" {
+		t.Fatalf("bad failed step: %q", got)
+	}
+	if got := FailedStep(jobs[:1]); got != "" {
+		t.Fatalf("want empty failed step, got %q", got)
+	}
+}
+
+func TestRerunWorkflowRun(t *testing.T) {
+	var method, path string
+	c, _ := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusCreated)
+	})
+	if err := c.RerunWorkflowRun(context.Background(), "me", "hubtop", 42); err != nil {
+		t.Fatal(err)
+	}
+	if method != "POST" || path != "/repos/me/hubtop/actions/runs/42/rerun" {
+		t.Fatalf("bad rerun request: %s %s", method, path)
+	}
+}
+
+func TestRerunWorkflowRunError(t *testing.T) {
+	c, _ := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"message":"Resource not accessible by personal access token"}`))
+	})
+	err := c.RerunWorkflowRun(context.Background(), "me", "hubtop", 42)
+	if err == nil || !strings.Contains(err.Error(), "not accessible") {
+		t.Fatalf("want permission error, got %v", err)
+	}
+}

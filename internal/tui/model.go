@@ -3,9 +3,12 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -40,9 +43,15 @@ type model struct {
 	runOf  map[int]*gh.WorkflowRun // repo index -> latest run (nil = none yet)
 	hasRun map[int]bool            // whether runOf[idx] was resolved
 
-	cursor int
-	offset int
-	gen    int // invalidates in-flight fetches
+	cursor  int
+	offset  int
+	viewIdx []int // repo indices currently shown (after filter)
+	gen     int   // invalidates in-flight fetches
+
+	filtering   bool
+	filterInput textinput.Model
+
+	status string // transient status line, cleared on refresh
 
 	loading bool
 	err     error
@@ -56,19 +65,38 @@ type model struct {
 }
 
 type repoDetail struct {
-	repo    gh.Repo
-	runs    []gh.WorkflowRun
-	release *gh.Release
-	issues  []gh.Issue
-	pulls   []gh.PullRequest
+	repo       gh.Repo
+	runs       []gh.WorkflowRun
+	failedInfo map[int64]string // run ID -> "job / step"
+	release    *gh.Release
+	issues     []gh.Issue
+	pulls      []gh.PullRequest
 }
 
 func newModel(client *gh.Client) *model {
+	ti := textinput.New()
+	ti.Placeholder = "filter repos…"
+	ti.CharLimit = 64
 	return &model{
-		client: client,
-		runOf:  make(map[int]*gh.WorkflowRun),
-		hasRun: make(map[int]bool),
+		client:      client,
+		runOf:       make(map[int]*gh.WorkflowRun),
+		hasRun:      make(map[int]bool),
+		filterInput: ti,
 	}
+}
+
+// openBrowser opens a URL in the system browser (best effort).
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	_ = cmd.Start()
 }
 
 // ---- messages ----
@@ -93,6 +121,13 @@ type detailMsg struct {
 }
 
 type tickMsg time.Time
+
+type rerunMsg struct {
+	gen     int
+	idx     int
+	err     error
+	runName string
+}
 
 // ---- commands ----
 
@@ -126,9 +161,23 @@ func (m *model) fetchDetailCmd(gen, idx int, repo gh.Repo) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 		owner, name := splitRepo(repo.FullName)
-		d := &repoDetail{repo: repo}
+		d := &repoDetail{repo: repo, failedInfo: make(map[int64]string)}
 		if runs, err := m.client.ListWorkflowRuns(ctx, owner, name, 10); err == nil {
 			d.runs = runs
+			// Resolve the failed job/step for the first couple of failed runs.
+			n := 0
+			for _, r := range runs {
+				if c := r.ConclusionValue(); c == "failure" || c == "timed_out" {
+					if jobs, err := m.client.ListRunJobs(ctx, owner, name, r.ID); err == nil {
+						if s := gh.FailedStep(jobs); s != "" {
+							d.failedInfo[r.ID] = s
+						}
+					}
+					if n++; n >= 2 {
+						break
+					}
+				}
+			}
 		}
 		if rel, err := m.client.LatestRelease(ctx, owner, name); err == nil {
 			d.release = rel
@@ -146,6 +195,51 @@ func (m *model) fetchDetailCmd(gen, idx int, repo gh.Repo) tea.Cmd {
 func tickCmd() tea.Msg {
 	time.Sleep(refreshEvery)
 	return tickMsg(time.Now())
+}
+
+// rerunCmd re-runs the latest failed run in the current detail view.
+func (m *model) rerunCmd() tea.Cmd {
+	if m.detail == nil {
+		m.status = "still loading…"
+		return nil
+	}
+	var target *gh.WorkflowRun
+	for i := range m.detail.runs {
+		if c := m.detail.runs[i].ConclusionValue(); c == "failure" || c == "timed_out" {
+			target = &m.detail.runs[i]
+			break
+		}
+	}
+	if target == nil {
+		m.status = "no failed runs to re-run"
+		return nil
+	}
+	run := *target
+	owner, name := splitRepo(m.detail.repo.FullName)
+	gen, idx := m.gen, m.detailIdx
+	m.status = fmt.Sprintf("re-running %s…", run.Name)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := m.client.RerunWorkflowRun(ctx, owner, name, run.ID)
+		return rerunMsg{gen: gen, idx: idx, err: err, runName: run.Name}
+	}
+}
+
+// applyFilter rebuilds the visible repo index list from the filter text.
+func (m *model) applyFilter() {
+	q := strings.ToLower(strings.TrimSpace(m.filterInput.Value()))
+	m.viewIdx = m.viewIdx[:0]
+	for i, r := range m.repos {
+		if q == "" || strings.Contains(strings.ToLower(r.Name), q) ||
+			strings.Contains(strings.ToLower(r.FullName), q) {
+			m.viewIdx = append(m.viewIdx, i)
+		}
+	}
+	if m.cursor >= len(m.viewIdx) {
+		m.cursor = max(0, len(m.viewIdx)-1)
+	}
+	m.offset = 0
 }
 
 func splitRepo(full string) (owner, repo string) {
@@ -186,9 +280,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repos = msg.repos
 		m.runOf = make(map[int]*gh.WorkflowRun)
 		m.hasRun = make(map[int]bool)
-		if m.cursor >= len(m.repos) {
-			m.cursor = max(0, len(m.repos)-1)
-		}
+		m.applyFilter()
 		cmds := make([]tea.Cmd, 0, len(m.repos))
 		for i, r := range m.repos {
 			if i >= maxRunPrefetch {
@@ -222,7 +314,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.gen++
+		m.status = ""
 		return m, tea.Batch(m.fetchReposCmd(m.gen), tickCmd)
+
+	case rerunMsg:
+		if msg.gen != m.gen || msg.idx != m.detailIdx {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.status = "re-run failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = "re-run started: " + msg.runName
+		m.gen++
+		m.detail = nil
+		return m, m.fetchDetailCmd(m.gen, m.detailIdx, m.repos[m.detailIdx])
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -237,11 +343,52 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Filter mode: all keys go to the input. The explicit m.filtering flag
+	// (not Focused()) decides this, so typing q/r inside the filter is safe.
+	if m.filtering {
+		switch msg.String() {
+		case "enter":
+			m.filtering = false
+			m.filterInput.Blur()
+			return m, nil
+		case "esc":
+			m.filtering = false
+			m.filterInput.Blur()
+			m.filterInput.SetValue("")
+			m.applyFilter()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.filterInput, cmd = m.filterInput.Update(msg)
+		m.applyFilter()
+		return m, cmd
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "/":
+		if m.view == viewRepos {
+			m.filtering = true
+			m.filterInput.Focus()
+			return m, textinput.Blink
+		}
+		return m, nil
+	case "o":
+		repo := m.currentRepo()
+		if repo != nil && repo.HTMLURL != "" {
+			openBrowser(repo.HTMLURL)
+			m.status = "opened " + repo.FullName + " in browser"
+		}
+		return m, nil
+	case "R":
+		if m.view == viewDetail {
+			return m, m.rerunCmd()
+		}
+		return m, nil
 	case "r":
 		m.gen++
+		m.status = ""
 		if m.view == viewDetail && m.detailIdx < len(m.repos) {
 			m.detail = nil
 			return m, m.fetchDetailCmd(m.gen, m.detailIdx, m.repos[m.detailIdx])
@@ -256,12 +403,12 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
-		if m.view == viewRepos && len(m.repos) > 0 {
+		if m.view == viewRepos && len(m.viewIdx) > 0 {
 			m.view = viewDetail
-			m.detailIdx = m.cursor
+			m.detailIdx = m.viewIdx[m.cursor]
 			m.detail = nil
 			m.gen++
-			return m, m.fetchDetailCmd(m.gen, m.cursor, m.repos[m.cursor])
+			return m, m.fetchDetailCmd(m.gen, m.detailIdx, m.repos[m.detailIdx])
 		}
 		return m, nil
 	}
@@ -276,7 +423,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "down", "j":
-			if m.cursor < len(m.repos)-1 {
+			if m.cursor < len(m.viewIdx)-1 {
 				m.cursor++
 				if m.h > 0 && m.cursor >= m.offset+m.visibleRows() {
 					m.offset = m.cursor - m.visibleRows() + 1
@@ -285,7 +432,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "home", "g":
 			m.cursor, m.offset = 0, 0
 		case "end", "G":
-			m.cursor = len(m.repos) - 1
+			m.cursor = len(m.viewIdx) - 1
 			if m.h > 0 {
 				m.offset = max(0, m.cursor-m.visibleRows()+1)
 			}
@@ -299,8 +446,31 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// currentRepo returns the repo under the cursor (or in the detail view).
+func (m *model) currentRepo() *gh.Repo {
+	if m.view == viewDetail && m.detail != nil {
+		return &m.detail.repo
+	}
+	if m.view == viewRepos && len(m.viewIdx) > 0 && m.cursor < len(m.viewIdx) {
+		r := m.repos[m.viewIdx[m.cursor]]
+		return &r
+	}
+	return nil
+}
+
+func (m *model) bottomBars() int {
+	n := 0
+	if m.filtering {
+		n++
+	}
+	if m.status != "" {
+		n++
+	}
+	return n
+}
+
 func (m *model) visibleRows() int {
-	n := m.h - 4
+	n := m.h - 2 - m.bottomBars()
 	if n < 1 {
 		n = 1
 	}
@@ -329,7 +499,7 @@ func (m *model) View() string {
 func (m *model) viewRepos() string {
 	var b strings.Builder
 	title := headerStyle.Render(fmt.Sprintf("hubtop — %d repos", len(m.repos)))
-	hint := dimStyle.Render("j/k move · enter detail · r refresh · q quit")
+	hint := dimStyle.Render("j/k move · enter detail · / filter · o open · r refresh · q quit")
 	b.WriteString(title + "  " + hint + "\n")
 	b.WriteString(dimStyle.Render(strings.Repeat("─", max(10, m.w-1))) + "\n")
 
@@ -341,24 +511,33 @@ func (m *model) viewRepos() string {
 		b.WriteString(red.Render("error: "+m.err.Error()) + "\n")
 		return b.String()
 	}
-	if len(m.repos) == 0 {
-		b.WriteString(dimStyle.Render("no repositories found") + "\n")
-		return b.String()
+	if len(m.viewIdx) == 0 {
+		if m.filterInput.Value() != "" {
+			b.WriteString(dimStyle.Render("no repos match filter") + "\n")
+		} else {
+			b.WriteString(dimStyle.Render("no repositories found") + "\n")
+		}
+	} else {
+		rows := m.visibleRows()
+		for p := m.offset; p < len(m.viewIdx) && p < m.offset+rows; p++ {
+			b.WriteString(m.renderRepoRow(m.viewIdx[p], p == m.cursor) + "\n")
+		}
 	}
-
-	rows := m.visibleRows()
-	for i := m.offset; i < len(m.repos) && i < m.offset+rows; i++ {
-		b.WriteString(m.renderRepoRow(i) + "\n")
+	if m.filtering {
+		b.WriteString("\n" + m.filterInput.View())
+	}
+	if m.status != "" {
+		b.WriteString("\n" + dimStyle.Render(m.status))
 	}
 	return b.String()
 }
 
-func (m *model) renderRepoRow(i int) string {
-	r := m.repos[i]
+func (m *model) renderRepoRow(repoIdx int, selected bool) string {
+	r := m.repos[repoIdx]
 
 	dot := dimStyle.Render("○")
-	if m.hasRun[i] {
-		run := m.runOf[i]
+	if m.hasRun[repoIdx] {
+		run := m.runOf[repoIdx]
 		if run == nil {
 			dot = gray.Render("–")
 		} else {
@@ -374,7 +553,7 @@ func (m *model) renderRepoRow(i int) string {
 	meta := dimStyle.Render(fmt.Sprintf("★%d  !%d  %s  %s", r.Stars, r.OpenIssues, r.Language, relTime(r.UpdatedAt)))
 	line := fmt.Sprintf("%s %s%s  %s", dot, name, lock, meta)
 
-	if i == m.cursor {
+	if selected {
 		// pad to full width for the highlight bar
 		pad := max(0, m.w-len(stripANSI(line))-1)
 		return selStyle.Render(line + strings.Repeat(" ", pad))

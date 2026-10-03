@@ -43,6 +43,7 @@ or just `gh auth login` — hubtop falls back to the `gh` CLI's token.
 
 A fine-grained PAT needs **Actions: read**, **Contents: read**,
 **Issues: read**, **Pull requests: read**, and **Metadata: read**.
+Re-running workflows (`R`) additionally needs **Actions: write**.
 
 ## Usage
 
@@ -59,7 +60,10 @@ Keybindings:
 |-----|--------|
 | `j`/`k`, `↑`/`↓` | move |
 | `enter` | open repo detail |
-| `esc` | back to repo list |
+| `esc` | back to repo list / exit filter |
+| `/` | filter repos by name |
+| `o` | open repo in browser |
+| `R` | re-run the latest failed workflow (detail view) |
 | `r` | refresh |
 | `q` | quit |
 
@@ -69,10 +73,10 @@ See [docs/USAGE.md](docs/USAGE.md) for details.
 
 ## Roadmap
 
-- [ ] Re-run failed workflows from the TUI
+- [x] Re-run failed workflows from the TUI
+- [x] Show failed job/step for red runs
 - [ ] Filter by CI status (`--only-failing`)
 - [ ] Notifications on status change
-- [ ] GitHub Enterprise base URL flag
 
 ## License
 

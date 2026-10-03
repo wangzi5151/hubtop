@@ -8,17 +8,26 @@
   `✓` passing, `✗` failing, `●` running, `○` queued, `–` no runs yet
 - **name**, **★ stars**, **! open issues/PRs**, **language**, **last push**
 
-Private repos show a 🔒.
+Private repos show a 🔒. Press `/` to filter by name (type to filter,
+`enter` to keep, `esc` to clear). Press `o` to open the selected repo
+in your browser.
 
 Press `enter` for the detail view:
 
 - **Workflow runs** — the 10 most recent runs with branch, short SHA,
-  conclusion, duration, and age
+  conclusion, duration, and age. Failed runs also show which job and
+  step failed (e.g. `← lint / gofmt`).
 - **Latest release** — tag and publish date
 - **Open pull requests / issues** — newest 5 each
 
 `esc` goes back, `r` refreshes, `q` quits. Data refreshes automatically
 every 60 seconds.
+
+## Re-running a failed workflow
+
+In the detail view, press `R` to re-run the latest failed workflow run.
+hubtop shows a status line while the re-run is requested and refreshes
+the view afterwards. Your token needs **Actions: write** for this.
 
 ## Script mode
 

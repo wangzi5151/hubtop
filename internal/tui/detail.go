@@ -7,14 +7,21 @@ import (
 
 func (m *model) viewDetail() string {
 	var b strings.Builder
-	hint := dimStyle.Render("esc back · r refresh · q quit")
+	hint := dimStyle.Render("esc back · R re-run failed · o open · r refresh · q quit")
 	b.WriteString(headerStyle.Render("hubtop") + "  " + hint + "\n")
 	b.WriteString(dimStyle.Render(strings.Repeat("─", max(10, m.w-1))) + "\n")
 	if m.detail == nil {
 		b.WriteString("loading…\n")
 		return b.String()
 	}
+	m.vp.Height = m.h - 2 - m.bottomBars()
+	if m.vp.Height < 1 {
+		m.vp.Height = 1
+	}
 	b.WriteString(m.vp.View())
+	if m.status != "" {
+		b.WriteString("\n" + dimStyle.Render(m.status))
+	}
 	return b.String()
 }
 
@@ -47,9 +54,13 @@ func (m *model) renderDetail() string {
 		if len(sha) > 7 {
 			sha = sha[:7]
 		}
-		b.WriteString(fmt.Sprintf("  %s %s  %s  %s  %s  %s  %s\n",
+		fail := ""
+		if s, ok := d.failedInfo[r.ID]; ok {
+			fail = dimStyle.Render("  ← " + s)
+		}
+		b.WriteString(fmt.Sprintf("  %s %s  %s  %s  %s  %s  %s%s\n",
 			runIcon(r.Status, r.ConclusionValue()),
-			r.Name, r.HeadBranch, sha, concl, shortDur(r.Duration()), relTime(r.CreatedAt)))
+			r.Name, r.HeadBranch, sha, concl, shortDur(r.Duration()), relTime(r.CreatedAt), fail))
 	}
 	b.WriteString("\n")
 

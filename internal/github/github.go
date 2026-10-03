@@ -4,6 +4,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,6 +81,44 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 	return json.Unmarshal(body, out)
 }
 
+// post sends an empty POST and expects a 2xx status.
+func (c *Client) post(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(nil))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "hubtop")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var apiErr struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(body, &apiErr)
+		if apiErr.Message == "" {
+			apiErr.Message = resp.Status
+		}
+		return fmt.Errorf("github api %s: %s", path, apiErr.Message)
+	}
+	return nil
+}
+
+func strVal(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // Repo is the subset of repository fields the dashboard shows.
 type Repo struct {
 	Name          string    `json:"name"`
@@ -89,6 +128,7 @@ type Repo struct {
 	Stars         int       `json:"stargazers_count"`
 	OpenIssues    int       `json:"open_issues_count"`
 	Language      string    `json:"language"`
+	HTMLURL       string    `json:"html_url"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	DefaultBranch string    `json:"default_branch"`
 }
@@ -150,6 +190,52 @@ func (c *Client) ListWorkflowRuns(ctx context.Context, owner, repo string, perPa
 		return nil, err
 	}
 	return wrap.Runs, nil
+}
+
+// Job is a job within a workflow run.
+type Job struct {
+	ID         int64     `json:"id"`
+	Name       string    `json:"name"`
+	Conclusion *string   `json:"conclusion"`
+	Steps      []JobStep `json:"steps"`
+}
+
+// JobStep is a single step within a job.
+type JobStep struct {
+	Name       string  `json:"name"`
+	Conclusion *string `json:"conclusion"`
+	Number     int     `json:"number"`
+}
+
+// ListRunJobs returns the jobs of a workflow run, newest job last.
+func (c *Client) ListRunJobs(ctx context.Context, owner, repo string, runID int64) ([]Job, error) {
+	var wrap struct {
+		Jobs []Job `json:"jobs"`
+	}
+	if err := c.get(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs", owner, repo, runID), nil, &wrap); err != nil {
+		return nil, err
+	}
+	return wrap.Jobs, nil
+}
+
+// RerunWorkflowRun re-runs a workflow run. Needs Actions: write.
+func (c *Client) RerunWorkflowRun(ctx context.Context, owner, repo string, runID int64) error {
+	return c.post(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs/%d/rerun", owner, repo, runID))
+}
+
+// FailedStep returns "job / step" for the first failed step, or "".
+func FailedStep(jobs []Job) string {
+	for _, j := range jobs {
+		if c := strVal(j.Conclusion); c == "failure" || c == "timed_out" {
+			for _, s := range j.Steps {
+				if sc := strVal(s.Conclusion); sc == "failure" || sc == "timed_out" {
+					return j.Name + " / " + s.Name
+				}
+			}
+			return j.Name
+		}
+	}
+	return ""
 }
 
 // Release is the subset of release fields the dashboard shows.

@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -166,3 +167,81 @@ func TestRerunWorkflowRunError(t *testing.T) {
 		t.Fatalf("want permission error, got %v", err)
 	}
 }
+
+func nReposJSON(n int) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"name":"r%d","full_name":"me/r%d","stargazers_count":%d}`, i, i, i)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+func TestListReposPaginates(t *testing.T) {
+	var pages []string
+	c, _ := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		switch page {
+		case "1":
+			w.Write([]byte(nReposJSON(repoPageSize)))
+		case "2":
+			w.Write([]byte(nReposJSON(1)))
+		default:
+			t.Errorf("unexpected page %q", page)
+			w.Write([]byte(`[]`))
+		}
+	})
+	repos, err := c.ListRepos(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != repoPageSize+1 {
+		t.Fatalf("want %d repos, got %d", repoPageSize+1, len(repos))
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("pages = %v, want [1 2]", pages)
+	}
+}
+
+func TestListReposPaginationIsCapped(t *testing.T) {
+	requests := 0
+	c, _ := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Write([]byte(nReposJSON(repoPageSize)))
+	})
+	repos, err := c.ListRepos(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != maxRepoPages {
+		t.Fatalf("requests = %d, want cap %d", requests, maxRepoPages)
+	}
+	if len(repos) != maxRepoPages*repoPageSize {
+		t.Fatalf("repos = %d, want %d", len(repos), maxRepoPages*repoPageSize)
+	}
+}
+
+func TestWorkflowRunFailed(t *testing.T) {
+	for _, tc := range []struct {
+		concl *string
+		want  bool
+	}{
+		{nil, false},
+		{strPtr("success"), false},
+		{strPtr("failure"), true},
+		{strPtr("timed_out"), true},
+		{strPtr("cancelled"), false},
+	} {
+		run := WorkflowRun{Conclusion: tc.concl}
+		if got := run.Failed(); got != tc.want {
+			t.Fatalf("Failed(%v) = %v, want %v", tc.concl, got, tc.want)
+		}
+	}
+}
+
+func strPtr(s string) *string { return &s }

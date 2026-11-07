@@ -133,14 +133,34 @@ type Repo struct {
 	DefaultBranch string    `json:"default_branch"`
 }
 
+const (
+	repoPageSize = 100
+	// maxRepoPages bounds pagination so a misbehaving API or a huge account
+	// cannot make hubtop loop forever (at most 2000 repositories).
+	maxRepoPages = 20
+)
+
 // ListRepos returns the authenticated user's repos, most recently updated first.
+// It follows /user/repos pagination up to maxRepoPages.
 func (c *Client) ListRepos(ctx context.Context) ([]Repo, error) {
-	var repos []Repo
-	q := url.Values{"per_page": {"100"}, "sort": {"updated"}, "affiliation": {"owner"}}
-	if err := c.get(ctx, "/user/repos", q, &repos); err != nil {
-		return nil, err
+	q := url.Values{
+		"per_page":    {fmt.Sprint(repoPageSize)},
+		"sort":        {"updated"},
+		"affiliation": {"owner"},
 	}
-	return repos, nil
+	var all []Repo
+	for page := 1; page <= maxRepoPages; page++ {
+		q.Set("page", fmt.Sprint(page))
+		var repos []Repo
+		if err := c.get(ctx, "/user/repos", q, &repos); err != nil {
+			return nil, err
+		}
+		all = append(all, repos...)
+		if len(repos) < repoPageSize {
+			break
+		}
+	}
+	return all, nil
 }
 
 // WorkflowRun is the subset of check-run fields the dashboard shows.
@@ -163,6 +183,16 @@ func (r WorkflowRun) ConclusionValue() string {
 		return ""
 	}
 	return *r.Conclusion
+}
+
+// Failed reports whether the run finished in a failing state.
+func (r WorkflowRun) Failed() bool {
+	switch r.ConclusionValue() {
+	case "failure", "timed_out":
+		return true
+	default:
+		return false
+	}
 }
 
 // Duration reports how long the run took (or has been running).

@@ -32,10 +32,11 @@ func run() error {
 	var (
 		showVersion = flag.Bool("version", false, "print version and exit")
 		failures    = flag.Bool("failures", false, "list repos with failing/running CI and exit non-zero on failures (no TUI)")
+		onlyFailing = flag.Bool("only-failing", false, "like --failures but list only repos whose latest CI run failed (no TUI)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "hubtop - terminal dashboard for your GitHub repositories\n\n")
-		fmt.Fprintf(os.Stderr, "Usage:\n  hubtop            open the dashboard (needs a terminal)\n  hubtop --failures check CI status across repos, script-friendly\n\n")
+		fmt.Fprintf(os.Stderr, "Usage:\n  hubtop                 open the dashboard (needs a terminal)\n  hubtop --failures      check CI status across repos, script-friendly\n  hubtop --only-failing  list only repos with failing CI\n\n")
 		fmt.Fprintf(os.Stderr, "Auth: set GITHUB_TOKEN, or log in with `gh auth login`.\n\n")
 		flag.PrintDefaults()
 	}
@@ -51,8 +52,8 @@ func run() error {
 	}
 	client := gh.New(token)
 
-	if *failures {
-		return runFailures(client)
+	if *failures || *onlyFailing {
+		return runFailures(client, *onlyFailing)
 	}
 
 	if !isatty.IsTerminal(os.Stdin.Fd()) {
@@ -74,8 +75,9 @@ func resolveToken() string {
 }
 
 // runFailures prints repos whose latest workflow run is failing or running.
-// It exits non-zero when at least one repo has a failed run.
-func runFailures(client *gh.Client) error {
+// With onlyFailing it skips the "running" rows. It exits non-zero when at
+// least one repo failed; API errors are never treated as "no runs".
+func runFailures(client *gh.Client, onlyFailing bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -84,15 +86,19 @@ func runFailures(client *gh.Client) error {
 		return err
 	}
 	failed := 0
+	var checkErrs []error
 	for _, r := range repos {
 		owner, name := split(r.FullName)
 		runs, err := client.ListWorkflowRuns(ctx, owner, name, 1)
-		if err != nil || len(runs) == 0 {
+		if err != nil {
+			checkErrs = append(checkErrs, fmt.Errorf("%s: %w", r.FullName, err))
+			continue
+		}
+		if len(runs) == 0 {
 			continue
 		}
 		run := runs[0]
-		concl := run.ConclusionValue()
-		if concl == "failure" || concl == "timed_out" {
+		if run.Failed() {
 			why := ""
 			if jobs, err := client.ListRunJobs(ctx, owner, name, run.ID); err == nil {
 				if ss := gh.FailedSteps(jobs); len(ss) > 0 {
@@ -101,12 +107,23 @@ func runFailures(client *gh.Client) error {
 			}
 			fmt.Printf("FAIL  %-32s %s %s%s %s\n", r.FullName, run.Name, run.HeadBranch, why, run.HTMLURL)
 			failed++
-		} else if concl == "" {
+		} else if run.ConclusionValue() == "" && !onlyFailing {
 			fmt.Printf("RUN   %-32s %s %s\n", r.FullName, run.Name, run.HeadBranch)
 		}
 	}
-	if failed > 0 {
+
+	if len(checkErrs) > 0 {
+		for _, err := range checkErrs {
+			fmt.Fprintln(os.Stderr, "ERR  ", err)
+		}
+	}
+	switch {
+	case failed > 0 && len(checkErrs) > 0:
+		return fmt.Errorf("%d repo(s) with failing CI; %d repo(s) could not be checked", failed, len(checkErrs))
+	case failed > 0:
 		return fmt.Errorf("%d repo(s) with failing CI", failed)
+	case len(checkErrs) > 0:
+		return fmt.Errorf("%d repo(s) could not be checked", len(checkErrs))
 	}
 	fmt.Println("all clear")
 	return nil

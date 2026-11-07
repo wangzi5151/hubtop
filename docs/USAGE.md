@@ -40,6 +40,10 @@ exits non-zero when anything fails. Handy for cron or a pre-push hook:
 hubtop --failures || echo "CI is red somewhere"
 ```
 
+`hubtop --only-failing` uses the same scan but omits the `RUN` rows, so it
+only lists repos whose latest run failed. API errors are reported and exit
+non-zero; they are never reported as "all clear".
+
 ## Auth details
 
 Resolution order: `GITHUB_TOKEN` env var, then `gh auth token`.

@@ -48,9 +48,10 @@ Re-running workflows (`R`) additionally needs **Actions: write**.
 ## Usage
 
 ```sh
-hubtop              # open the dashboard
-hubtop --failures   # script-friendly CI check: lists failing/running repos,
-                    # exits non-zero when something is red
+hubtop                  # open the dashboard
+hubtop --failures       # script-friendly CI check: lists failing/running repos,
+                        # exits non-zero when something is red
+hubtop --only-failing   # same check, but lists only repos with failed CI
 hubtop --version
 ```
 
@@ -75,7 +76,7 @@ See [docs/USAGE.md](docs/USAGE.md) for details.
 
 - [x] Re-run failed workflows from the TUI
 - [x] Show failed job/step for red runs
-- [ ] Filter by CI status (`--only-failing`)
+- [x] Filter by CI status (`--only-failing`)
 - [ ] Notifications on status change
 
 ## License

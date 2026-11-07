@@ -43,10 +43,7 @@ func (s sortMode) String() string {
 	}
 }
 
-const (
-	maxRunPrefetch = 30
-	refreshEvery   = 60 * time.Second
-)
+const refreshEvery = 60 * time.Second
 
 // Run starts the hubtop TUI.
 func Run(client *gh.Client) error {
@@ -59,10 +56,11 @@ func Run(client *gh.Client) error {
 type model struct {
 	client *gh.Client
 
-	view   view
-	repos  []gh.Repo
-	runOf  map[int]*gh.WorkflowRun // repo index -> latest run (nil = none yet)
-	hasRun map[int]bool            // whether runOf[idx] was resolved
+	view       view
+	repos      []gh.Repo
+	runOf      map[int]*gh.WorkflowRun // repo index -> latest run (nil = none yet)
+	hasRun     map[int]bool            // whether runOf[idx] was resolved
+	runLoading map[int]bool            // in-flight fetch guard (avoid duplicates)
 
 	cursor  int
 	offset  int
@@ -104,22 +102,36 @@ func newModel(client *gh.Client) *model {
 		client:      client,
 		runOf:       make(map[int]*gh.WorkflowRun),
 		hasRun:      make(map[int]bool),
+		runLoading:  make(map[int]bool),
 		filterInput: ti,
 	}
 }
 
-// openBrowser opens a URL in the system browser (best effort).
-func openBrowser(url string) {
-	var cmd *exec.Cmd
+// browserCommand builds the platform command that opens url. It is a variable
+// so tests can substitute a harmless process.
+var browserCommand = func(url string) *exec.Cmd {
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		return exec.Command("open", url)
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		return exec.Command("xdg-open", url)
 	}
-	_ = cmd.Start()
+}
+
+// waitBrowser reaps the child process. It is a variable so tests can observe
+// that Wait is actually called (Start alone leaves a zombie).
+var waitBrowser = func(cmd *exec.Cmd) error { return cmd.Wait() }
+
+// openBrowser opens a URL in the system browser (best effort) and reaps the
+// child asynchronously so it cannot become a zombie.
+func openBrowser(url string) {
+	cmd := browserCommand(url)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	go func() { _ = waitBrowser(cmd) }()
 }
 
 // ---- messages ----
@@ -276,6 +288,52 @@ func (m *model) applyFilter() {
 	m.offset = 0
 }
 
+// runFetchTargets returns the repo indices whose CI status should be fetched
+// now: the rows currently visible in the list that are neither loaded nor
+// already in flight. This replaces the old fixed first-30 prefetch, so any
+// repo gets a status as it scrolls into view.
+func (m *model) runFetchTargets() []int {
+	if m.view != viewRepos || len(m.viewIdx) == 0 {
+		return nil
+	}
+	rows := m.visibleRows()
+	start := m.offset
+	if start < 0 {
+		start = 0
+	}
+	end := start + rows
+	if end > len(m.viewIdx) {
+		end = len(m.viewIdx)
+	}
+	out := make([]int, 0, end-start)
+	for p := start; p < end; p++ {
+		idx := m.viewIdx[p]
+		if idx < 0 || idx >= len(m.repos) {
+			continue
+		}
+		if m.hasRun[idx] || m.runLoading[idx] {
+			continue
+		}
+		out = append(out, idx)
+	}
+	return out
+}
+
+// prefetchVisibleRuns schedules status fetches for the visible window.
+func (m *model) prefetchVisibleRuns() tea.Cmd {
+	targets := m.runFetchTargets()
+	if len(targets) == 0 {
+		return nil
+	}
+	cmds := make([]tea.Cmd, 0, len(targets))
+	for _, idx := range targets {
+		m.runLoading[idx] = true
+		owner, name := splitRepo(m.repos[idx].FullName)
+		cmds = append(cmds, m.fetchRunCmd(m.gen, idx, owner, name))
+	}
+	return tea.Batch(cmds...)
+}
+
 func splitRepo(full string) (owner, repo string) {
 	parts := strings.SplitN(full, "/", 2)
 	if len(parts) == 2 {
@@ -299,7 +357,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		m.vp.Width = msg.Width
 		m.vp.Height = msg.Height - 4
-		return m, nil
+		return m, m.prefetchVisibleRuns()
 
 	case reposMsg:
 		if msg.gen != m.gen {
@@ -314,21 +372,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.repos = msg.repos
 		m.runOf = make(map[int]*gh.WorkflowRun)
 		m.hasRun = make(map[int]bool)
+		m.runLoading = make(map[int]bool)
 		m.applyFilter()
-		cmds := make([]tea.Cmd, 0, len(m.repos))
-		for i, r := range m.repos {
-			if i >= maxRunPrefetch {
-				break
-			}
-			owner, name := splitRepo(r.FullName)
-			cmds = append(cmds, m.fetchRunCmd(m.gen, i, owner, name))
-		}
-		return m, tea.Batch(cmds...)
+		return m, m.prefetchVisibleRuns()
 
 	case runStatusMsg:
 		if msg.gen != m.gen || msg.idx >= len(m.repos) {
 			return m, nil
 		}
+		delete(m.runLoading, msg.idx)
 		m.runOf[msg.idx] = msg.run
 		m.hasRun[msg.idx] = true
 		return m, nil
@@ -399,12 +451,12 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filterInput.Blur()
 			m.filterInput.SetValue("")
 			m.applyFilter()
-			return m, nil
+			return m, m.prefetchVisibleRuns()
 		}
 		var cmd tea.Cmd
 		m.filterInput, cmd = m.filterInput.Update(msg)
 		m.applyFilter()
-		return m, cmd
+		return m, tea.Batch(cmd, m.prefetchVisibleRuns())
 	}
 
 	switch msg.String() {
@@ -418,6 +470,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sort = (m.sort + 1) % 3
 			m.applyFilter()
 			m.status = "sorted by " + m.sort.String()
+			return m, m.prefetchVisibleRuns()
 		}
 		return m, nil
 	case "/":
@@ -452,7 +505,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.view == viewDetail {
 			m.view = viewRepos
 			m.detail = nil
-			return m, nil
+			return m, m.prefetchVisibleRuns()
 		}
 		return m, nil
 	case "enter":
@@ -490,7 +543,7 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.offset = max(0, m.cursor-m.visibleRows()+1)
 			}
 		}
-		return m, nil
+		return m, m.prefetchVisibleRuns()
 	}
 
 	// detail view: let the viewport scroll
